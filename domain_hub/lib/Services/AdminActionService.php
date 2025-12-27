@@ -40,6 +40,7 @@ class CfAdminActionService
         'add_rootdomain' => [self::class, 'handleRootdomainAdd'],
         'delete_rootdomain' => [self::class, 'handleRootdomainDelete'],
         'toggle_rootdomain' => [self::class, 'handleRootdomainToggle'],
+        'toggle_rootdomain_maintenance' => [self::class, 'handleRootdomainMaintenanceToggle'],
         'set_rootdomain_status' => [self::class, 'handleRootdomainSetStatus'],
         'set_rootdomain_limit' => [self::class, 'handleRootdomainSetLimit'],
         'update_rootdomain_order' => [self::class, 'handleRootdomainOrderUpdate'],
@@ -483,6 +484,38 @@ class CfAdminActionService
         self::redirect(self::HASH_ROOT_WHITELIST);
     }
 
+    private static function handleRootdomainMaintenanceToggle(): void
+    {
+        $id = intval($_POST['id'] ?? ($_GET['id'] ?? 0));
+        if ($id <= 0) {
+            self::flashError('参数无效');
+            self::redirect(self::HASH_ROOT_WHITELIST);
+        }
+        $row = Capsule::table('mod_cloudflare_rootdomains')->where('id', $id)->first();
+        if ($row) {
+            $currentMode = intval($row->maintenance_mode ?? 0);
+            $newMode = $currentMode === 1 ? 0 : 1;
+            Capsule::table('mod_cloudflare_rootdomains')->where('id', $id)->update([
+                'maintenance_mode' => $newMode,
+                'updated_at' => date('Y-m-d H:i:s')
+            ]);
+            if (function_exists('cfmod_clear_rootdomain_maintenance_cache')) {
+                cfmod_clear_rootdomain_maintenance_cache();
+            }
+            if (function_exists('cloudflare_subdomain_log')) {
+                cloudflare_subdomain_log('admin_toggle_rootdomain_maintenance', ['domain' => $row->domain, 'maintenance_mode' => $newMode]);
+            }
+            if ($newMode === 1) {
+                self::flashSuccess('已启用根域名 ' . htmlspecialchars($row->domain, ENT_QUOTES, 'UTF-8') . ' 的维护模式');
+            } else {
+                self::flashSuccess('已关闭根域名 ' . htmlspecialchars($row->domain, ENT_QUOTES, 'UTF-8') . ' 的维护模式');
+            }
+        } else {
+            self::flashError('未找到该根域名');
+        }
+        self::redirect(self::HASH_ROOT_WHITELIST);
+    }
+
     private static function handleRootdomainSetStatus(): void
     {
         $sel = trim($_POST['rootdomain_id'] ?? '');
@@ -750,7 +783,7 @@ class CfAdminActionService
         if ($batchSize <= 0) {
             $batchSize = 200;
         }
-        $batchSize = max(25, min(500, $batchSize));
+        $batchSize = max(25, min(5000, $batchSize));
         $deleteOld = ($_POST['transfer_delete_old'] ?? '') === '1';
         $pauseRegistration = ($_POST['transfer_pause_registration'] ?? '') === '1';
         $autoResume = ($_POST['transfer_auto_resume'] ?? '1') === '1';
@@ -955,7 +988,7 @@ class CfAdminActionService
                 self::flash('未找到根域名 ' . $targetRoot . ' 下的子域名', 'warning');
                 self::redirect(self::HASH_ROOT_WHITELIST);
             }
-            $batchSize = max(20, min(500, ($batchSizeInput > 0 ? $batchSizeInput : 200)));
+            $batchSize = max(20, min(5000, ($batchSizeInput > 0 ? $batchSizeInput : 200)));
             $payload = [
                 'rootdomain' => $targetRoot,
                 'batch_size' => $batchSize,
@@ -2738,7 +2771,7 @@ class CfAdminActionService
         $rootdomain = strtolower(trim((string)($_POST['orphan_rootdomain'] ?? '')));
         $limit = intval($_POST['orphan_subdomain_limit'] ?? 100);
         if ($limit < 10) { $limit = 10; }
-        if ($limit > 500) { $limit = 500; }
+        if ($limit > 5000) { $limit = 5000; }
         $mode = $_POST['orphan_mode'] ?? 'dry';
         $cursorMode = strtolower(trim((string)($_POST['orphan_cursor_mode'] ?? 'resume')));
         if (!in_array($cursorMode, ['resume', 'reset'], true)) {
@@ -2778,7 +2811,7 @@ class CfAdminActionService
         $rootdomain = strtolower(trim((string)($params['rootdomain'] ?? '')));
         $limit = intval($params['limit'] ?? 100);
         if ($limit < 10) { $limit = 10; }
-        if ($limit > 500) { $limit = 500; }
+        if ($limit > 5000) { $limit = 5000; }
         $mode = $params['mode'] ?? 'dry';
         $cursorMode = strtolower(trim((string)($params['cursor_mode'] ?? 'resume')));
         if (!in_array($cursorMode, ['resume', 'reset'], true)) {

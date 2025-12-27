@@ -285,7 +285,7 @@ add_hook('AfterCronJob', 1, function($vars) {
         if ($cleanupGraceDays >= 0) {
             $cleanupBatch = intval($settings['domain_cleanup_batch_size'] ?? 50);
             if ($cleanupBatch <= 0) { $cleanupBatch = 50; }
-            $cleanupBatch = max(1, min(500, $cleanupBatch));
+            $cleanupBatch = max(1, min(5000, $cleanupBatch));
             $cleanupDeep = in_array(($settings['domain_cleanup_deep_delete'] ?? 'yes'), ['1','on','yes','true'], true);
             $cleanupIntervalHoursRaw = $settings['domain_cleanup_interval_hours'] ?? 24;
             $cleanupIntervalHours = is_numeric($cleanupIntervalHoursRaw) ? (int) $cleanupIntervalHoursRaw : 24;

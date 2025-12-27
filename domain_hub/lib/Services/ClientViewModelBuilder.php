@@ -138,6 +138,7 @@ class CfClientViewModelBuilder
 
         $globals['roots'] = self::loadRootDomains();
         $globals['rootLimitMap'] = self::loadRootLimitMap();
+        $globals['rootMaintenanceMap'] = self::loadRootMaintenanceMap();
 
         $globals['userid'] = $userId;
         $globals['myInviteCode'] = self::ensureInviteCode($userId);
@@ -313,6 +314,18 @@ class CfClientViewModelBuilder
         return array_values(array_unique(array_filter($roots, static function ($d) {
             return $d !== '';
         })));
+    }
+
+    public static function loadRootMaintenanceMap(): array
+    {
+        if (function_exists('cfmod_get_rootdomain_maintenance_map')) {
+            try {
+                return array_change_key_case(cfmod_get_rootdomain_maintenance_map(), CASE_LOWER);
+            } catch (\Throwable $e) {
+                return [];
+            }
+        }
+        return [];
     }
 
     private static function loadRootLimitMap(): array

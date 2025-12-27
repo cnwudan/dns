@@ -90,7 +90,10 @@
                                     $redemptionDaysSetting = is_numeric($redemptionDaysSettingRaw) ? (int)$redemptionDaysSettingRaw : 0;
                                     if ($redemptionDaysSetting < 0) { $redemptionDaysSetting = 0; }
                                     $redemptionSecondsSetting = $redemptionDaysSetting * 86400;
+                                    $rootMaintenanceMap = $rootMaintenanceMap ?? [];
                                     foreach($existing as $e):
+                                        $eRootLower = strtolower(trim($e->rootdomain ?? ''));
+                                        $isRootInMaintenance = isset($rootMaintenanceMap[$eRootLower]) && $rootMaintenanceMap[$eRootLower] === true;
                                         $neverExpires = intval($e->never_expires ?? 0) === 1;
                                         $expiresRaw = $e->expires_at ?? null;
                                         $expiresTs = $expiresRaw ? strtotime($expiresRaw) : null;
@@ -171,7 +174,12 @@
                                                 <span class="badge bg-danger ms-2"><i class="fas fa-clock"></i> <?php echo cfclient_lang('cfclient.subdomains.delete.badge', '待删除', [], true); ?></span>
                                             <?php endif; ?>
                                         </td>
-                                        <td><?php echo htmlspecialchars($e->rootdomain); ?></td>
+                                        <td>
+                                            <?php echo htmlspecialchars($e->rootdomain); ?>
+                                            <?php if ($isRootInMaintenance): ?>
+                                            <span class="badge bg-warning text-dark ms-1" title="<?php echo cfclient_lang('cfclient.subdomains.badge.maintenance_hint', '该根域名正在维护中，暂时无法进行DNS操作', [], true); ?>"><i class="fas fa-tools"></i> <?php echo cfclient_lang('cfclient.subdomains.badge.maintenance', '维护中', [], true); ?></span>
+                                            <?php endif; ?>
+                                        </td>
                                         <td>
                                             <?php 
                                             // 检查是否有任何DNS记录（包括三级域名记录）
@@ -222,11 +230,21 @@
                                         </td>
                                         <td>
                                             <div class="btn-group btn-group-sm">
+                                                <?php if ($isRootInMaintenance): ?>
+                                                <button type="button" class="btn btn-outline-primary" disabled title="<?php echo cfclient_lang('cfclient.subdomains.tooltip.maintenance', '根域名维护中，暂时无法进行DNS操作', [], true); ?>">
+                                                    <i class="fas fa-plus"></i> <?php echo cfclient_lang('cfclient.subdomains.button.add_dns', '添加解析', [], true); ?>
+                                                </button>
+                                                <?php else: ?>
                                                 <button type="button" class="btn btn-outline-primary" 
                                                         onclick="showDnsForm(<?php echo $e->id; ?>, '<?php echo htmlspecialchars($e->subdomain); ?>', false)">
                                                     <i class="fas fa-plus"></i> <?php echo cfclient_lang('cfclient.subdomains.button.add_dns', '添加解析', [], true); ?>
                                                 </button>
-                                                <?php if(!$disableNsManagement): ?>
+                                                <?php endif; ?>
+                                                <?php if($isRootInMaintenance): ?>
+                                                <button type="button" class="btn btn-outline-secondary" disabled title="<?php echo cfclient_lang('cfclient.subdomains.tooltip.maintenance', '根域名维护中，暂时无法进行DNS操作', [], true); ?>">
+                                                    <i class="fas fa-server"></i> <?php echo cfclient_lang('cfclient.subdomains.button.ns', 'DNS服务器', [], true); ?>
+                                                </button>
+                                                <?php elseif(!$disableNsManagement): ?>
                                                 <button type="button" class="btn btn-outline-secondary" 
                                                         onclick="showNsModal(<?php echo $e->id; ?>, '<?php echo htmlspecialchars($e->subdomain); ?>')">
                                                     <i class="fas fa-server"></i> <?php echo cfclient_lang('cfclient.subdomains.button.ns', 'DNS服务器', [], true); ?>

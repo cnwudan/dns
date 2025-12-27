@@ -159,6 +159,12 @@ function api_handle_subdomain_register(array $data, $keyRow, array $settings): a
         return [$code, $result];
     }
 
+    if (api_is_rootdomain_in_maintenance($root)) {
+        $code = 503;
+        $result = ['error' => 'root domain under maintenance', 'rootdomain' => $root];
+        return [$code, $result];
+    }
+
     $limitCheck = function_exists('cfmod_check_rootdomain_user_limit') ? cfmod_check_rootdomain_user_limit($keyRow->userid, $root, 1) : ['allowed' => true, 'limit' => 0];
     if (!$limitCheck['allowed']) {
         $code = 403;
@@ -524,6 +530,31 @@ function api_is_rootdomain_allowed(string $rootdomain, array $settings): bool {
 
     $active = array_map('strtolower', api_root_config_list($settings));
     return in_array($rootdomain, $active, true);
+}
+
+function api_is_rootdomain_in_maintenance(string $rootdomain): bool {
+    if (function_exists('cfmod_is_rootdomain_in_maintenance')) {
+        return cfmod_is_rootdomain_in_maintenance($rootdomain);
+    }
+    $rootdomain = strtolower(trim($rootdomain));
+    if ($rootdomain === '') {
+        return false;
+    }
+    try {
+        if (!Capsule::schema()->hasTable('mod_cloudflare_rootdomains')) {
+            return false;
+        }
+        if (!Capsule::schema()->hasColumn('mod_cloudflare_rootdomains', 'maintenance_mode')) {
+            return false;
+        }
+        $row = Capsule::table('mod_cloudflare_rootdomains')
+            ->select('maintenance_mode')
+            ->whereRaw('LOWER(domain)=?', [$rootdomain])
+            ->first();
+        return $row && intval($row->maintenance_mode ?? 0) === 1;
+    } catch (\Throwable $e) {
+        return false;
+    }
 }
 
 function api_get_user_quota(int $userid, array $settings) {
@@ -1228,6 +1259,9 @@ function handleApiRequest(){
                         } elseif (strtolower($s->status ?? '') === 'suspended') {
                             $code = 403;
                             $result = ['error' => 'subdomain suspended'];
+                        } elseif (api_is_rootdomain_in_maintenance($s->rootdomain ?? '')) {
+                            $code = 503;
+                            $result = ['error' => 'root domain under maintenance', 'rootdomain' => $s->rootdomain ?? ''];
                         } else {
                             $limitPerSub = intval($settings['max_dns_records_per_subdomain'] ?? 0);
                             $providerContext = cfmod_acquire_provider_client_for_subdomain($s, $settings);
@@ -1340,6 +1374,9 @@ function handleApiRequest(){
                         } elseif (strtolower($s->status ?? '') === 'suspended') {
                             $code = 403;
                             $result = ['error' => 'subdomain suspended'];
+                        } elseif (api_is_rootdomain_in_maintenance($s->rootdomain ?? '')) {
+                            $code = 503;
+                            $result = ['error' => 'root domain under maintenance', 'rootdomain' => $s->rootdomain ?? ''];
                         } else {
                             $providerContext = cfmod_acquire_provider_client_for_subdomain($s, $settings);
                             if (!$providerContext || empty($providerContext['client'])) {
@@ -1393,6 +1430,9 @@ function handleApiRequest(){
                             } elseif (strtolower($s->status ?? '') === 'suspended') {
                                 $code = 403;
                                 $result = ['error' => 'subdomain suspended'];
+                            } elseif (api_is_rootdomain_in_maintenance($s->rootdomain ?? '')) {
+                                $code = 503;
+                                $result = ['error' => 'root domain under maintenance', 'rootdomain' => $s->rootdomain ?? ''];
                             } else {
                                 $zone = $rec->zone_id ?: ($s->cloudflare_zone_id ?: $s->rootdomain);
                                 $updateData = [];

@@ -85,6 +85,7 @@ $orderSaveLabel = $lang['rootdomain_order_save'] ?? '保存排序';
                         <th>默认年限</th>
                         <th>描述</th>
                         <th>状态</th>
+                        <th>维护模式</th>
                         <th>创建时间</th>
                         <th>操作</th>
                     </tr>
@@ -122,6 +123,10 @@ $orderSaveLabel = $lang['rootdomain_order_save'] ?? '保存排序';
                         <td>
                             <span class="badge bg-<?php echo $rd->status==='active'?'success':'secondary'; ?>"><?php echo $rd->status==='active'?'可注册':'已停止注册'; ?></span>
                         </td>
+                        <td>
+                            <?php $rdMaintenance = intval($rd->maintenance_mode ?? 0); ?>
+                            <span class="badge bg-<?php echo $rdMaintenance ? 'danger' : 'light text-dark border'; ?>"><?php echo $rdMaintenance ? '维护中' : '正常'; ?></span>
+                        </td>
                         <td><?php echo date('Y-m-d H:i', strtotime($rd->created_at)); ?></td>
                         <td>
                             <div class="btn-group">
@@ -131,6 +136,14 @@ $orderSaveLabel = $lang['rootdomain_order_save'] ?? '保存排序';
                                     <input type="hidden" name="id" value="<?php echo $rd->id; ?>">
                                     <button type="submit" class="btn btn-sm btn-outline-<?php echo $rd->status==='active'?'warning':'success'; ?>">
                                         <?php echo $rd->status==='active'?'停止注册':'重新开启注册'; ?>
+                                    </button>
+                                </form>
+                                <form method="post" class="d-inline" onsubmit="return confirm('<?php echo $rdMaintenance ? '确定关闭维护模式？关闭后用户可进行DNS操作。' : '确定启用维护模式？启用后将禁止该根域下所有DNS操作。'; ?>');">
+                                    <input type="hidden" name="action" value="toggle_rootdomain_maintenance">
+                                    <input type="hidden" name="id" value="<?php echo $rd->id; ?>">
+                                    <button type="submit" class="btn btn-sm btn-outline-<?php echo $rdMaintenance ? 'info' : 'danger'; ?>" title="<?php echo $rdMaintenance ? '关闭维护模式' : '启用维护模式'; ?>">
+                                        <i class="fas fa-<?php echo $rdMaintenance ? 'play' : 'tools'; ?>"></i>
+                                        <?php echo $rdMaintenance ? '恢复' : '维护'; ?>
                                     </button>
                                 </form>
                                 <form method="post" class="d-inline" onsubmit="return confirm('确定删除该根域名？');">
@@ -262,8 +275,8 @@ $orderSaveLabel = $lang['rootdomain_order_save'] ?? '保存排序';
                 </div>
                 <div class="col-md-4">
                     <label class="form-label">批次大小</label>
-                    <input type="number" class="form-control" name="transfer_batch_size" value="200" min="25" max="500">
-                    <div class="form-text">每批处理的子域数量，建议 50-200</div>
+                    <input type="number" class="form-control" name="transfer_batch_size" value="200" min="25" max="5000">
+                    <div class="form-text">每批处理的子域数量，建议 50-500，最大 5000</div>
                 </div>
                 <div class="col-md-6">
                     <div class="form-check">

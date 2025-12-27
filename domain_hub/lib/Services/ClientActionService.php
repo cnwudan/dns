@@ -528,7 +528,7 @@ if($_POST['action'] == "register") {
                                 $dbHasRoots = Capsule::table('mod_cloudflare_rootdomains')->count() > 0;
                                 if ($dbHasRoots) {
                                     $st = Capsule::table('mod_cloudflare_rootdomains')
-                                        ->select('status')
+                                        ->select('status', 'maintenance_mode')
                                         ->whereRaw('LOWER(domain)=?', [strtolower($rootdomain)])
                                         ->first();
                                     if ($st && ($st->status ?? '') !== 'active') {
@@ -536,6 +536,12 @@ if($_POST['action'] == "register") {
                                         $msg_type = 'danger';
                                         $registerError = $msg;
                                         throw new Exception('suspended rootdomain');
+                                    }
+                                    if ($st && intval($st->maintenance_mode ?? 0) === 1) {
+                                        $msg = self::actionText('register.root_maintenance', '该根域名正在维护中，暂时无法注册新域名');
+                                        $msg_type = 'warning';
+                                        $registerError = $msg;
+                                        throw new Exception('maintenance rootdomain');
                                     }
                                 }
                             } catch (Exception $e) {}
@@ -1024,6 +1030,9 @@ if($_POST['action'] == "create_dns" && isset($_POST['subdomain_id'])) {
                         if ($record->status === 'suspended') {
                             $msg = self::actionText('dns.domain_suspended', '该域名已被暂停，无法进行解析操作');
                             $msg_type = "warning";
+                        } elseif (function_exists('cfmod_is_rootdomain_in_maintenance') && cfmod_is_rootdomain_in_maintenance($record->rootdomain ?? '')) {
+                            $msg = self::actionText('dns.rootdomain_maintenance', '该根域名正在维护中，暂时无法进行DNS操作');
+                            $msg_type = "warning";
                         } else {
                             list($cf, $providerError, $providerContext) = cfmod_client_acquire_provider_for_subdomain($record, $module_settings);
                             if (!$cf) {
@@ -1435,6 +1444,9 @@ if($_POST['action'] == "update_dns" && isset($_POST['subdomain_id'])) {
                     if ($record->status === 'suspended') {
                         $msg = self::actionText('dns.domain_suspended', '该域名已被暂停，无法进行解析操作');
                         $msg_type = "warning";
+                    } elseif (function_exists('cfmod_is_rootdomain_in_maintenance') && cfmod_is_rootdomain_in_maintenance($record->rootdomain ?? '')) {
+                        $msg = self::actionText('dns.rootdomain_maintenance', '该根域名正在维护中，暂时无法进行DNS操作');
+                        $msg_type = "warning";
                     } else {
                         $targetRecord = null;
                         if ($record_id) {
@@ -1610,6 +1622,9 @@ if($_POST['action'] == "toggle_cdn" && isset($_POST['subdomain_id'])) {
                 if ($record->status === 'suspended') {
                     $msg = self::actionText('dns.domain_suspended', '该域名已被暂停，无法进行解析操作');
                     $msg_type = "warning";
+                } elseif (function_exists('cfmod_is_rootdomain_in_maintenance') && cfmod_is_rootdomain_in_maintenance($record->rootdomain ?? '')) {
+                    $msg = self::actionText('dns.rootdomain_maintenance', '该根域名正在维护中，暂时无法进行DNS操作');
+                    $msg_type = "warning";
                 } else {
                     list($cf, $providerError, $providerContext) = cfmod_client_acquire_provider_for_subdomain($record, $module_settings);
                     if (!$cf) {
@@ -1677,6 +1692,9 @@ if($_POST['action'] == "toggle_record_cdn" && isset($_POST['subdomain_id']) && i
             if ($sub) {
                 if ($sub->status === 'suspended') {
                     $msg = self::actionText('dns.domain_suspended', '该域名已被暂停，无法进行解析操作');
+                    $msg_type = "warning";
+                } elseif (function_exists('cfmod_is_rootdomain_in_maintenance') && cfmod_is_rootdomain_in_maintenance($sub->rootdomain ?? '')) {
+                    $msg = self::actionText('dns.rootdomain_maintenance', '该根域名正在维护中，暂时无法进行DNS操作');
                     $msg_type = "warning";
                 } else {
                     $rec = Capsule::table('mod_cloudflare_dns_records')
@@ -1748,6 +1766,10 @@ if($_POST['action'] == "delete_dns_record" && isset($_POST['record_id']) && isse
             ->first();
 
         if ($sub) {
+            if (function_exists('cfmod_is_rootdomain_in_maintenance') && cfmod_is_rootdomain_in_maintenance($sub->rootdomain ?? '')) {
+                $msg = self::actionText('dns.rootdomain_maintenance', '该根域名正在维护中，暂时无法进行DNS操作');
+                $msg_type = "warning";
+            } else {
             $rec = Capsule::table('mod_cloudflare_dns_records')
                 ->where('subdomain_id', $subdomain_id)
                 ->where('record_id', $record_id)
@@ -1823,6 +1845,7 @@ if($_POST['action'] == "delete_dns_record" && isset($_POST['record_id']) && isse
                         $msg_type = "danger";
                     }
                 }
+            }
             }
         }
     } catch (Exception $e) {
@@ -1910,6 +1933,9 @@ if($_POST['action'] == 'replace_ns_group' && isset($_POST['subdomain_id'])) {
                 if ($sub) {
                     if ($sub->status === 'suspended') {
                         $msg = self::actionText('dns.domain_suspended', '该域名已被暂停，无法进行解析操作');
+                        $msg_type = "warning";
+                    } elseif (function_exists('cfmod_is_rootdomain_in_maintenance') && cfmod_is_rootdomain_in_maintenance($sub->rootdomain ?? '')) {
+                        $msg = self::actionText('dns.rootdomain_maintenance', '该根域名正在维护中，暂时无法进行DNS操作');
                         $msg_type = "warning";
                     } else {
                         list($cf, $providerError, $providerContext) = cfmod_client_acquire_provider_for_subdomain($sub, $module_settings);
