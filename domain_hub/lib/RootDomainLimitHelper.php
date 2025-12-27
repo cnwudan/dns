@@ -66,3 +66,54 @@ if (!function_exists('cfmod_check_rootdomain_user_limit')) {
         return CfSubdomainService::instance()->checkRootdomainUserLimit($userid, $rootdomain, $expectedNewDomains);
     }
 }
+
+if (!function_exists('cfmod_get_rootdomain_maintenance_map')) {
+    function cfmod_get_rootdomain_maintenance_map(): array {
+        if (isset($GLOBALS['cfmod_rootdomain_maintenance_cache']) && is_array($GLOBALS['cfmod_rootdomain_maintenance_cache'])) {
+            return $GLOBALS['cfmod_rootdomain_maintenance_cache'];
+        }
+
+        $map = [];
+        try {
+            if (!Capsule::schema()->hasTable('mod_cloudflare_rootdomains')) {
+                $GLOBALS['cfmod_rootdomain_maintenance_cache'] = $map;
+                return $map;
+            }
+
+            if (!Capsule::schema()->hasColumn('mod_cloudflare_rootdomains', 'maintenance_mode')) {
+                $GLOBALS['cfmod_rootdomain_maintenance_cache'] = $map;
+                return $map;
+            }
+
+            $rows = Capsule::table('mod_cloudflare_rootdomains')->select('domain', 'maintenance_mode')->get();
+            foreach ($rows as $row) {
+                $domain = strtolower(trim($row->domain ?? ''));
+                if ($domain === '') {
+                    continue;
+                }
+                $map[$domain] = intval($row->maintenance_mode ?? 0) === 1;
+            }
+        } catch (\Throwable $e) {
+        }
+
+        $GLOBALS['cfmod_rootdomain_maintenance_cache'] = $map;
+        return $map;
+    }
+}
+
+if (!function_exists('cfmod_clear_rootdomain_maintenance_cache')) {
+    function cfmod_clear_rootdomain_maintenance_cache(): void {
+        unset($GLOBALS['cfmod_rootdomain_maintenance_cache']);
+    }
+}
+
+if (!function_exists('cfmod_is_rootdomain_in_maintenance')) {
+    function cfmod_is_rootdomain_in_maintenance(string $rootdomain): bool {
+        $rootdomain = strtolower(trim($rootdomain));
+        if ($rootdomain === '') {
+            return false;
+        }
+        $map = cfmod_get_rootdomain_maintenance_map();
+        return isset($map[$rootdomain]) && $map[$rootdomain] === true;
+    }
+}

@@ -263,6 +263,7 @@ class CfModuleInstaller
                         $table->integer('provider_account_id')->unsigned()->nullable();
                         $table->string('cloudflare_zone_id', 50)->nullable();
                         $table->string('status', 20)->default('active');
+                        $table->boolean('maintenance_mode')->default(0);
                         $table->integer('display_order')->default(0);
                         $table->text('description')->nullable();
                         $table->integer('max_subdomains')->default(1000);
@@ -282,6 +283,11 @@ class CfModuleInstaller
                         if (!Capsule::schema()->hasColumn('mod_cloudflare_rootdomains', 'default_term_years')) {
                             Capsule::schema()->table('mod_cloudflare_rootdomains', function ($table) {
                                 $table->integer('default_term_years')->default(0)->after('per_user_limit');
+                            });
+                        }
+                        if (!Capsule::schema()->hasColumn('mod_cloudflare_rootdomains', 'maintenance_mode')) {
+                            Capsule::schema()->table('mod_cloudflare_rootdomains', function ($table) {
+                                $table->boolean('maintenance_mode')->default(0)->after('status');
                             });
                         }
                         $addedDisplayOrderColumn = false;

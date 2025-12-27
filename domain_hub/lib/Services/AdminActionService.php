@@ -40,6 +40,7 @@ class CfAdminActionService
         'add_rootdomain' => [self::class, 'handleRootdomainAdd'],
         'delete_rootdomain' => [self::class, 'handleRootdomainDelete'],
         'toggle_rootdomain' => [self::class, 'handleRootdomainToggle'],
+        'toggle_rootdomain_maintenance' => [self::class, 'handleRootdomainMaintenanceToggle'],
         'set_rootdomain_status' => [self::class, 'handleRootdomainSetStatus'],
         'set_rootdomain_limit' => [self::class, 'handleRootdomainSetLimit'],
         'update_rootdomain_order' => [self::class, 'handleRootdomainOrderUpdate'],
@@ -479,6 +480,38 @@ class CfAdminActionService
                 cloudflare_subdomain_log('admin_toggle_rootdomain', ['domain' => $row->domain, 'status' => $newStatus]);
             }
             self::flashSuccess('根域名状态已更新');
+        }
+        self::redirect(self::HASH_ROOT_WHITELIST);
+    }
+
+    private static function handleRootdomainMaintenanceToggle(): void
+    {
+        $id = intval($_POST['id'] ?? ($_GET['id'] ?? 0));
+        if ($id <= 0) {
+            self::flashError('参数无效');
+            self::redirect(self::HASH_ROOT_WHITELIST);
+        }
+        $row = Capsule::table('mod_cloudflare_rootdomains')->where('id', $id)->first();
+        if ($row) {
+            $currentMode = intval($row->maintenance_mode ?? 0);
+            $newMode = $currentMode === 1 ? 0 : 1;
+            Capsule::table('mod_cloudflare_rootdomains')->where('id', $id)->update([
+                'maintenance_mode' => $newMode,
+                'updated_at' => date('Y-m-d H:i:s')
+            ]);
+            if (function_exists('cfmod_clear_rootdomain_maintenance_cache')) {
+                cfmod_clear_rootdomain_maintenance_cache();
+            }
+            if (function_exists('cloudflare_subdomain_log')) {
+                cloudflare_subdomain_log('admin_toggle_rootdomain_maintenance', ['domain' => $row->domain, 'maintenance_mode' => $newMode]);
+            }
+            if ($newMode === 1) {
+                self::flashSuccess('已启用根域名 ' . htmlspecialchars($row->domain, ENT_QUOTES, 'UTF-8') . ' 的维护模式');
+            } else {
+                self::flashSuccess('已关闭根域名 ' . htmlspecialchars($row->domain, ENT_QUOTES, 'UTF-8') . ' 的维护模式');
+            }
+        } else {
+            self::flashError('未找到该根域名');
         }
         self::redirect(self::HASH_ROOT_WHITELIST);
     }
