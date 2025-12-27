@@ -1346,9 +1346,9 @@ function domain_hub_config() {
             "calibration_batch_size" => [
                 "FriendlyName" => "校准批量大小",
                 "Type" => "text",
-                "Size" => "4",
+                "Size" => "5",
                 "Default" => "150",
-                "Description" => "每个校准作业处理的子域数量，建议 100-500，数值越大单次作业耗时越久。",
+                "Description" => "每个校准作业处理的子域数量，建议 100-500，最大 5000，数值越大单次作业耗时越久。",
             ],
             // 邀请全局配置
             "invite_bonus_limit_global" => [

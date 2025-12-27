@@ -783,7 +783,7 @@ class CfAdminActionService
         if ($batchSize <= 0) {
             $batchSize = 200;
         }
-        $batchSize = max(25, min(500, $batchSize));
+        $batchSize = max(25, min(5000, $batchSize));
         $deleteOld = ($_POST['transfer_delete_old'] ?? '') === '1';
         $pauseRegistration = ($_POST['transfer_pause_registration'] ?? '') === '1';
         $autoResume = ($_POST['transfer_auto_resume'] ?? '1') === '1';
@@ -988,7 +988,7 @@ class CfAdminActionService
                 self::flash('未找到根域名 ' . $targetRoot . ' 下的子域名', 'warning');
                 self::redirect(self::HASH_ROOT_WHITELIST);
             }
-            $batchSize = max(20, min(500, ($batchSizeInput > 0 ? $batchSizeInput : 200)));
+            $batchSize = max(20, min(5000, ($batchSizeInput > 0 ? $batchSizeInput : 200)));
             $payload = [
                 'rootdomain' => $targetRoot,
                 'batch_size' => $batchSize,
@@ -2771,7 +2771,7 @@ class CfAdminActionService
         $rootdomain = strtolower(trim((string)($_POST['orphan_rootdomain'] ?? '')));
         $limit = intval($_POST['orphan_subdomain_limit'] ?? 100);
         if ($limit < 10) { $limit = 10; }
-        if ($limit > 500) { $limit = 500; }
+        if ($limit > 5000) { $limit = 5000; }
         $mode = $_POST['orphan_mode'] ?? 'dry';
         $cursorMode = strtolower(trim((string)($_POST['orphan_cursor_mode'] ?? 'resume')));
         if (!in_array($cursorMode, ['resume', 'reset'], true)) {
@@ -2811,7 +2811,7 @@ class CfAdminActionService
         $rootdomain = strtolower(trim((string)($params['rootdomain'] ?? '')));
         $limit = intval($params['limit'] ?? 100);
         if ($limit < 10) { $limit = 10; }
-        if ($limit > 500) { $limit = 500; }
+        if ($limit > 5000) { $limit = 5000; }
         $mode = $params['mode'] ?? 'dry';
         $cursorMode = strtolower(trim((string)($params['cursor_mode'] ?? 'resume')));
         if (!in_array($cursorMode, ['resume', 'reset'], true)) {

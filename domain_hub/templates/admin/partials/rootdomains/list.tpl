@@ -275,8 +275,8 @@ $orderSaveLabel = $lang['rootdomain_order_save'] ?? '保存排序';
                 </div>
                 <div class="col-md-4">
                     <label class="form-label">批次大小</label>
-                    <input type="number" class="form-control" name="transfer_batch_size" value="200" min="25" max="500">
-                    <div class="form-text">每批处理的子域数量，建议 50-200</div>
+                    <input type="number" class="form-control" name="transfer_batch_size" value="200" min="25" max="5000">
+                    <div class="form-text">每批处理的子域数量，建议 50-500，最大 5000</div>
                 </div>
                 <div class="col-md-6">
                     <div class="form-check">

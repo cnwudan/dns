@@ -330,8 +330,8 @@ $cfmodOrphanRootOptionsHtml = implode("\n", $orphanRootOptions);
       </div>
       <div class="col-12 col-md-4">
         <label class="form-label"><?php echo htmlspecialchars($cleanupBatch); ?></label>
-        <input type="number" class="form-control" name="batch_size" min="20" max="500" value="200">
-        <small class="text-muted">建议 20-500，值越大单次处理的记录越多。</small>
+        <input type="number" class="form-control" name="batch_size" min="20" max="5000" value="200">
+        <small class="text-muted">建议 50-500，最大 5000，值越大单次处理的记录越多。</small>
       </div>
       <div class="col-12 col-md-4 d-flex align-items-center">
         <div class="form-check form-switch mt-4">
@@ -367,7 +367,7 @@ $cfmodOrphanRootOptionsHtml = implode("\n", $orphanRootOptions);
       </div>
       <div class="col-12 col-md-4">
         <label class="form-label" for="cf-orphan-limit"><?php echo htmlspecialchars($orphanLimitLabel); ?></label>
-        <input type="number" class="form-control" id="cf-orphan-limit" name="orphan_subdomain_limit" min="10" max="500" value="100">
+        <input type="number" class="form-control" id="cf-orphan-limit" name="orphan_subdomain_limit" min="10" max="5000" value="100">
       </div>
       <div class="col-12 col-md-4">
         <label class="form-label" for="cf-orphan-cursor-mode"><?php echo htmlspecialchars($orphanCursorLabel); ?></label>
