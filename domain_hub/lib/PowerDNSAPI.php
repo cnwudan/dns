@@ -17,6 +17,8 @@ class PowerDNSAPI
     private $api_key;
     private $server_id;
     private $timeout;
+    private array $zoneDetailCache = [];
+    private array $zoneRecordCache = [];
 
     /**
      * @param string $api_url PowerDNS API base URL (e.g., http://localhost:8081/api/v1)
@@ -215,6 +217,52 @@ class PowerDNSAPI
         return $records;
     }
 
+    private function clearZoneCache(string $zoneName): void
+    {
+        $normalized = $this->normalizeZoneName($zoneName);
+        $key = strtolower($normalized);
+        unset($this->zoneDetailCache[$key], $this->zoneRecordCache[$key]);
+    }
+
+    private function ensureZoneRecordCache(string $zoneName): bool
+    {
+        $normalized = $this->normalizeZoneName($zoneName);
+        $key = strtolower($normalized);
+        if (isset($this->zoneRecordCache[$key])) {
+            return true;
+        }
+
+        $detail = $this->loadZoneDetail($normalized);
+        if (!($detail['success'] ?? false)) {
+            return false;
+        }
+
+        $rrsets = $detail['result']['rrsets'] ?? [];
+        $flat = [];
+        $index = [];
+        foreach ($rrsets as $rrset) {
+            $mapped = $this->mapPdnsToCfRecord($rrset, $normalized);
+            foreach ($mapped as $record) {
+                $flat[] = $record;
+                $nameKey = strtolower($record['name'] ?? '');
+                $typeKey = strtoupper($record['type'] ?? '');
+                if ($nameKey === '' || $typeKey === '') {
+                    continue;
+                }
+                if (!isset($index[$nameKey][$typeKey])) {
+                    $index[$nameKey][$typeKey] = [];
+                }
+                $index[$nameKey][$typeKey][] = $record;
+            }
+        }
+
+        $this->zoneRecordCache[$key] = [
+            'flat' => $flat,
+            'index' => $index,
+        ];
+        return true;
+    }
+
     /**
      * Generate a unique record ID (PowerDNS doesn't have individual record IDs)
      */
@@ -306,10 +354,20 @@ class PowerDNSAPI
         return $value;
     }
 
-    private function loadZoneDetail(string $zoneName): array
+    private function loadZoneDetail(string $zoneName, bool $forceRefresh = false): array
     {
-        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
-        return $this->request('GET', $endpoint);
+        $normalized = $this->normalizeZoneName($zoneName);
+        $cacheKey = strtolower($normalized);
+        if (!$forceRefresh && isset($this->zoneDetailCache[$cacheKey])) {
+            return $this->zoneDetailCache[$cacheKey];
+        }
+
+        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($normalized);
+        $res = $this->request('GET', $endpoint);
+        if ($res['success'] ?? false) {
+            $this->zoneDetailCache[$cacheKey] = $res;
+        }
+        return $res;
     }
 
     // ==================== Public API Methods ====================
@@ -411,42 +469,47 @@ class PowerDNSAPI
 
     private function fetchZoneRecords(string $zoneName, array $params = [], ?string $filterName = null): array
     {
-        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
-        $res = $this->request('GET', $endpoint);
-
-        if (!($res['success'] ?? false)) {
-            return ['success' => false, 'errors' => $res['errors'] ?? ['query failed']];
+        if (!$this->ensureZoneRecordCache($zoneName)) {
+            return ['success' => false, 'errors' => ['zone_fetch_failed']];
         }
 
-        $rrsets = $res['result']['rrsets'] ?? [];
-        $result = [];
+        $normalized = $this->normalizeZoneName($zoneName);
+        $cacheKey = strtolower($normalized);
+        $cache = $this->zoneRecordCache[$cacheKey];
+
         $targetName = $filterName ? $this->normalizeRecordName($filterName) : null;
         if ($targetName === '@.' || $targetName === '@') {
-            $targetName = $zoneName;
+            $targetName = $normalized;
         }
         if ($targetName !== null) {
-            $zoneTrimmed = $this->stripTrailingDot($zoneName);
+            $zoneTrimmed = $this->stripTrailingDot($normalized);
             $targetTrimmed = $this->stripTrailingDot($targetName);
             if ($targetTrimmed !== $zoneTrimmed && substr($targetTrimmed, -strlen($zoneTrimmed)) !== $zoneTrimmed) {
                 $targetName = $this->normalizeRecordName($targetTrimmed . '.' . $zoneTrimmed);
             }
         }
+
         $typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
-
-        foreach ($rrsets as $rrset) {
-            $rrsetName = $rrset['name'] ?? '';
-
-            if ($targetName !== null && $rrsetName !== $targetName) {
-                continue;
+        $result = [];
+        if ($targetName !== null) {
+            $nameKey = strtolower($this->stripTrailingDot($targetName));
+            $recordsByName = $cache['index'][$nameKey] ?? [];
+            if ($typeFilter !== null) {
+                $recordsByName = isset($recordsByName[$typeFilter]) ? $recordsByName[$typeFilter] : [];
+            } else {
+                $flattened = [];
+                foreach ($recordsByName as $list) {
+                    $flattened = array_merge($flattened, $list);
+                }
+                $recordsByName = $flattened;
             }
-
-            if ($typeFilter !== null && ($rrset['type'] ?? '') !== $typeFilter) {
-                continue;
-            }
-
-            $mapped = $this->mapPdnsToCfRecord($rrset, $zoneName);
-            foreach ($mapped as $rec) {
-                $result[] = $rec;
+            $result = $recordsByName;
+        } else {
+            $result = $cache['flat'];
+            if ($typeFilter !== null) {
+                $result = array_values(array_filter($result, static function ($record) use ($typeFilter) {
+                    return strtoupper($record['type'] ?? '') === $typeFilter;
+                }));
             }
         }
 
@@ -575,6 +638,7 @@ class PowerDNSAPI
             return ['success' => false, 'errors' => $res['errors'] ?? ['create failed']];
         }
 
+        $this->clearZoneCache($zoneName);
         $recordId = $this->generateRecordId($this->stripTrailingDot($recordName), $type, $this->stripTrailingDot($content));
 
         return [
@@ -667,7 +731,8 @@ class PowerDNSAPI
 
         $newRecordId = $this->buildRecordIdFromRaw($recordName, $type, $formattedContent);
 
-        return ['success' => true, 'result' => ['id' => $newRecordId]];
+                $this->clearZoneCache($zoneName);
+return ['success' => true, 'result' => ['id' => $newRecordId]];
     }
 
     /**
@@ -755,6 +820,7 @@ class PowerDNSAPI
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
         }
 
+        $this->clearZoneCache($zoneName);
         return ['success' => true, 'result' => []];
     }
 
@@ -799,7 +865,8 @@ class PowerDNSAPI
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
         }
 
-        return ['success' => true, 'deleted_count' => count($records['result'])];
+                $this->clearZoneCache($zoneName);
+return ['success' => true, 'deleted_count' => count($records['result'])];
     }
 
     /**
@@ -850,7 +917,8 @@ class PowerDNSAPI
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
         }
 
-        return ['success' => true, 'deleted_count' => count($toDelete), 'note' => 'deep'];
+                $this->clearZoneCache($zoneName);
+return ['success' => true, 'deleted_count' => count($toDelete), 'note' => 'deep'];
     }
 
     /**
@@ -916,8 +984,9 @@ class PowerDNSAPI
 
         if (!($res['success'] ?? false)) {
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
-        }
+}
 
+        $this->clearZoneCache($zoneName);
         return ['success' => true, 'result' => []];
     }
 
