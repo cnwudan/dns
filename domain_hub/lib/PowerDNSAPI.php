@@ -19,6 +19,7 @@ class PowerDNSAPI
     private $timeout;
     private array $zoneDetailCache = [];
     private array $zoneRecordCache = [];
+    private array $zoneRecordCacheDisabled = [];
 
     /**
      * @param string $api_url PowerDNS API base URL (e.g., http://localhost:8081/api/v1)
@@ -221,11 +222,124 @@ class PowerDNSAPI
     {
         $normalized = $this->normalizeZoneName($zoneName);
         $key = strtolower($normalized);
-        unset($this->zoneDetailCache[$key], $this->zoneRecordCache[$key]);
+        unset($this->zoneDetailCache[$key], $this->zoneRecordCache[$key], $this->zoneRecordCacheDisabled[$key]);
+    }
+
+    private function markZoneCacheDisabled(string $zoneName): void
+    {
+        $key = strtolower($this->normalizeZoneName($zoneName));
+        $this->zoneRecordCacheDisabled[$key] = true;
+    }
+
+    private function isZoneCacheDisabled(string $zoneName): bool
+    {
+        $key = strtolower($this->normalizeZoneName($zoneName));
+        return !empty($this->zoneRecordCacheDisabled[$key]);
+    }
+
+    private function memoryLimitBytes(): int
+    {
+        $limit = ini_get('memory_limit');
+        if ($limit === false || $limit === '' || $limit === '-1') {
+            return 0;
+        }
+        $value = trim($limit);
+        $unit = strtolower(substr($value, -1));
+        $number = (int) $value;
+        switch ($unit) {
+            case 'g':
+                return $number * 1024 * 1024 * 1024;
+            case 'm':
+                return $number * 1024 * 1024;
+            case 'k':
+                return $number * 1024;
+            default:
+                return (int) $value;
+        }
+    }
+
+    private function canCacheEstimatedRecords(int $estimatedRecords): bool
+    {
+        if ($estimatedRecords <= 0) {
+            return true;
+        }
+        $limit = $this->memoryLimitBytes();
+        if ($limit === 0) {
+            return true;
+        }
+        $usage = function_exists('memory_get_usage') ? memory_get_usage(true) : 0;
+        $headroom = $limit - $usage;
+        if ($headroom <= 0) {
+            return false;
+        }
+        $estimatedBytes = max(1, $estimatedRecords) * 400;
+        return ($estimatedBytes * 2) < $headroom;
+    }
+
+    private function normalizeTargetName(?string $filterName, string $zoneName): ?string
+    {
+        if ($filterName === null) {
+            return null;
+        }
+        $targetName = $this->normalizeRecordName($filterName);
+        if ($targetName === '@.' || $targetName === '@') {
+            return $zoneName;
+        }
+        $zoneTrimmed = $this->stripTrailingDot($zoneName);
+        $targetTrimmed = $this->stripTrailingDot($targetName);
+        if ($targetTrimmed !== $zoneTrimmed && substr($targetTrimmed, -strlen($zoneTrimmed)) !== $zoneTrimmed) {
+            return $this->normalizeRecordName($targetTrimmed . '.' . $zoneTrimmed);
+        }
+        return $targetName;
+    }
+
+    private function collectRecordsFromCacheIndex(array $index, ?string $targetName, ?string $typeFilter): array
+    {
+        $result = [];
+        $typeFilter = $typeFilter ? strtoupper($typeFilter) : null;
+        if ($targetName !== null) {
+            $nameKey = strtolower($this->stripTrailingDot($targetName));
+            $typeGroups = $index[$nameKey] ?? [];
+            if ($typeFilter !== null) {
+                $typeGroups = isset($typeGroups[$typeFilter]) ? [$typeGroups[$typeFilter]] : [];
+            }
+            foreach ($typeGroups as $records) {
+                foreach ($records as $record) {
+                    if ($typeFilter !== null && strtoupper($record['type'] ?? '') !== $typeFilter) {
+                        continue;
+                    }
+                    $result[] = $record;
+                }
+            }
+            return $result;
+        }
+
+        foreach ($index as $typeGroups) {
+            if ($typeFilter !== null) {
+                if (!empty($typeGroups[$typeFilter])) {
+                    foreach ($typeGroups[$typeFilter] as $record) {
+                        if (strtoupper($record['type'] ?? '') === $typeFilter) {
+                            $result[] = $record;
+                        }
+                    }
+                }
+                continue;
+            }
+            foreach ($typeGroups as $records) {
+                foreach ($records as $record) {
+                    $result[] = $record;
+                }
+            }
+        }
+        return $result;
     }
 
     private function ensureZoneRecordCache(string $zoneName): bool
     {
+        if ($this->isZoneCacheDisabled($zoneName)) {
+            return false;
+        }
+
         $normalized = $this->normalizeZoneName($zoneName);
         $key = strtolower($normalized);
         if (isset($this->zoneRecordCache[$key])) {
@@ -238,29 +352,95 @@ class PowerDNSAPI
         }
 
         $rrsets = $detail['result']['rrsets'] ?? [];
-        $flat = [];
+        $estimatedRecords = 0;
+        foreach ($rrsets as $rrset) {
+            $estimatedRecords += max(1, count($rrset['records'] ?? []));
+        }
+        if (!$this->canCacheEstimatedRecords($estimatedRecords)) {
+            $this->markZoneCacheDisabled($zoneName);
+            return false;
+        }
+
         $index = [];
         foreach ($rrsets as $rrset) {
             $mapped = $this->mapPdnsToCfRecord($rrset, $normalized);
-            foreach ($mapped as $record) {
-                $flat[] = $record;
-                $nameKey = strtolower($record['name'] ?? '');
-                $typeKey = strtoupper($record['type'] ?? '');
-                if ($nameKey === '' || $typeKey === '') {
-                    continue;
-                }
-                if (!isset($index[$nameKey][$typeKey])) {
-                    $index[$nameKey][$typeKey] = [];
-                }
-                $index[$nameKey][$typeKey][] = $record;
+            if (empty($mapped)) {
+                continue;
             }
+            $nameKey = strtolower($this->stripTrailingDot($rrset['name'] ?? ''));
+            $typeKey = strtoupper($rrset['type'] ?? '');
+            if ($nameKey === '' || $typeKey === '') {
+                continue;
+            }
+            $index[$nameKey][$typeKey] = $mapped;
         }
 
         $this->zoneRecordCache[$key] = [
-            'flat' => $flat,
             'index' => $index,
         ];
         return true;
+    }
+
+    private function filterRrsetsToRecords(array $rrsets, string $zoneName, array $params = [], ?string $filterName = null): array
+    {
+        $normalized = $this->normalizeZoneName($zoneName);
+        $targetName = $this->normalizeTargetName($filterName, $normalized);
+        $typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
+        $result = [];
+        foreach ($rrsets as $rrset) {
+            $rrsetName = $rrset['name'] ?? '';
+            if ($targetName !== null && $rrsetName !== $targetName) {
+                continue;
+            }
+            if ($typeFilter !== null && strtoupper($rrset['type'] ?? '') !== $typeFilter) {
+                continue;
+            }
+            $result = array_merge($result, $this->mapPdnsToCfRecord($rrset, $normalized));
+        }
+        return $result;
+    }
+
+    private function updateZoneCacheRrset(string $zoneName, string $recordName, string $type, array $records, ?int $ttl = null): void
+    {
+        $zoneKey = strtolower($this->normalizeZoneName($zoneName));
+        if (empty($this->zoneRecordCache[$zoneKey])) {
+            return;
+        }
+        if (empty($records)) {
+            $this->removeZoneCacheRrset($zoneName, $recordName, $type);
+            return;
+        }
+
+        $normalizedZone = $this->normalizeZoneName($zoneName);
+        $rrset = [
+            'name' => $this->normalizeRecordName($recordName),
+            'type' => strtoupper($type),
+            'ttl' => $ttl ?? self::DEFAULT_TTL,
+            'records' => [],
+        ];
+        foreach ($records as $record) {
+            $rrset['records'][] = [
+                'content' => $record['content'] ?? '',
+                'disabled' => !empty($record['disabled']),
+            ];
+        }
+        $mapped = $this->mapPdnsToCfRecord($rrset, $normalizedZone);
+        $nameKey = strtolower($this->stripTrailingDot($rrset['name']));
+        $this->zoneRecordCache[$zoneKey]['index'][$nameKey][$rrset['type']] = $mapped;
+    }
+
+    private function removeZoneCacheRrset(string $zoneName, string $recordName, string $type): void
+    {
+        $zoneKey = strtolower($this->normalizeZoneName($zoneName));
+        if (empty($this->zoneRecordCache[$zoneKey])) {
+            return;
+        }
+        $nameKey = strtolower($this->stripTrailingDot($this->normalizeRecordName($recordName)));
+        $typeKey = strtoupper($type);
+        unset($this->zoneRecordCache[$zoneKey]['index'][$nameKey][$typeKey]);
+        if (empty($this->zoneRecordCache[$zoneKey]['index'][$nameKey])) {
+            unset($this->zoneRecordCache[$zoneKey]['index'][$nameKey]);
+        }
     }
 
     /**
@@ -441,6 +621,16 @@ class PowerDNSAPI
         $trimmedName = trim((string) $name);
 
         if ($trimmedName !== '') {
+            $precise = $this->fetchZoneRecordsPrecise($zoneName, $trimmedName, $params);
+            if (($precise['success'] ?? false) && empty($precise['fallback'])) {
+                return $precise;
+            }
+            if (($precise['success'] ?? false) && empty($precise['result'])) {
+                // allow fallback to search-data when precise lookup returns no entries
+            } elseif (!($precise['success'] ?? false) && empty($precise['fallback'])) {
+                return $precise;
+            }
+
             $searchResult = $this->fetchRecordsByName($zoneName, $trimmedName, $params);
             if ($searchResult['success'] ?? false) {
                 return $searchResult;
@@ -448,7 +638,8 @@ class PowerDNSAPI
             if (empty($searchResult['success']) && empty($searchResult['fallback'])) {
                 return $searchResult;
             }
-            // fall back to full zone fetch when search-data is unavailable
+
+            // fall back to full zone fetch when the previous strategies cannot satisfy the query
             return $this->fetchZoneRecords($zoneName, $params, $trimmedName);
         }
 
@@ -468,55 +659,57 @@ class PowerDNSAPI
     }
 
     private function fetchZoneRecords(string $zoneName, array $params = [], ?string $filterName = null): array
-    {
+{
         if (!$this->ensureZoneRecordCache($zoneName)) {
-            return ['success' => false, 'errors' => ['zone_fetch_failed']];
+            return $this->fetchZoneRecordsWithoutCache($zoneName, $params, $filterName);
         }
 
         $normalized = $this->normalizeZoneName($zoneName);
         $cacheKey = strtolower($normalized);
-        $cache = $this->zoneRecordCache[$cacheKey];
-
-        $targetName = $filterName ? $this->normalizeRecordName($filterName) : null;
-        if ($targetName === '@.' || $targetName === '@') {
-            $targetName = $normalized;
-        }
-        if ($targetName !== null) {
-            $zoneTrimmed = $this->stripTrailingDot($normalized);
-            $targetTrimmed = $this->stripTrailingDot($targetName);
-            if ($targetTrimmed !== $zoneTrimmed && substr($targetTrimmed, -strlen($zoneTrimmed)) !== $zoneTrimmed) {
-                $targetName = $this->normalizeRecordName($targetTrimmed . '.' . $zoneTrimmed);
-            }
-        }
-
+        $cacheIndex = $this->zoneRecordCache[$cacheKey]['index'] ?? [];
+        $targetName = $this->normalizeTargetName($filterName, $normalized);
         $typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
-        $result = [];
-        if ($targetName !== null) {
-            $nameKey = strtolower($this->stripTrailingDot($targetName));
-            $recordsByName = $cache['index'][$nameKey] ?? [];
-            if ($typeFilter !== null) {
-                $recordsByName = isset($recordsByName[$typeFilter]) ? $recordsByName[$typeFilter] : [];
-            } else {
-                $flattened = [];
-                foreach ($recordsByName as $list) {
-                    $flattened = array_merge($flattened, $list);
-                }
-                $recordsByName = $flattened;
-            }
-            $result = $recordsByName;
-        } else {
-            $result = $cache['flat'];
-            if ($typeFilter !== null) {
-                $result = array_values(array_filter($result, static function ($record) use ($typeFilter) {
-                    return strtoupper($record['type'] ?? '') === $typeFilter;
-                }));
-            }
-        }
+        $result = $this->collectRecordsFromCacheIndex($cacheIndex, $targetName, $typeFilter);
 
         return ['success' => true, 'result' => $result];
     }
 
-    private function fetchRecordsByName(string $zoneName, string $name, array $params): array
+    private function fetchZoneRecordsWithoutCache(string $zoneName, array $params = [], ?string $filterName = null): array
+    {
+        $normalized = $this->normalizeZoneName($zoneName);
+        $detail = $this->loadZoneDetail($normalized);
+        if (!($detail['success'] ?? false)) {
+            return ['success' => false, 'errors' => $detail['errors'] ?? ['zone_fetch_failed']];
+        }
+
+        $rrsets = $detail['result']['rrsets'] ?? [];
+        $records = $this->filterRrsetsToRecords($rrsets, $normalized, $params, $filterName);
+
+        return ['success' => true, 'result' => $records];
+    }
+
+    private function fetchZoneRecordsPrecise(string $zoneName, string $name, array $params = []): array
+    {
+        $normalizedZone = $this->normalizeZoneName($zoneName);
+        $targetName = $this->normalizeTargetName($name, $normalizedZone) ?? $this->normalizeRecordName($name);
+        $query = ['rrset_name' => $targetName];
+        if (!empty($params['type'])) {
+            $query['rrset_type'] = strtoupper($params['type']);
+        }
+        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($normalizedZone) . '?' . http_build_query($query);
+        $res = $this->request('GET', $endpoint);
+        if (!($res['success'] ?? false)) {
+            return ['success' => false, 'fallback' => true, 'errors' => $res['errors'] ?? ['precise query failed']];
+        }
+        $rrsets = $res['result']['rrsets'] ?? [];
+        if (empty($rrsets)) {
+            return ['success' => true, 'result' => [], 'fallback' => true];
+        }
+        $records = $this->filterRrsetsToRecords($rrsets, $normalizedZone, $params, $targetName);
+        return ['success' => true, 'result' => $records];
+    }
+
+private function fetchRecordsByName(string $zoneName, string $name, array $params): array
     {
         $searchName = $this->normalizeRecordName($name);
         if ($searchName === '@.' || $searchName === '@') {
@@ -638,7 +831,7 @@ class PowerDNSAPI
             return ['success' => false, 'errors' => $res['errors'] ?? ['create failed']];
         }
 
-        $this->clearZoneCache($zoneName);
+        $this->updateZoneCacheRrset($zoneName, $recordName, $type, $existingRecords, $ttl);
         $recordId = $this->generateRecordId($this->stripTrailingDot($recordName), $type, $this->stripTrailingDot($content));
 
         return [
@@ -731,7 +924,7 @@ class PowerDNSAPI
 
         $newRecordId = $this->buildRecordIdFromRaw($recordName, $type, $formattedContent);
 
-                $this->clearZoneCache($zoneName);
+                $this->updateZoneCacheRrset($zoneName, $recordName, $type, $recordsPayload, $ttlForPatch);
 return ['success' => true, 'result' => ['id' => $newRecordId]];
     }
 
@@ -820,7 +1013,11 @@ return ['success' => true, 'result' => ['id' => $newRecordId]];
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
         }
 
-        $this->clearZoneCache($zoneName);
+        if (empty($remainingRecords)) {
+            $this->removeZoneCacheRrset($zoneName, $targetName, $targetType);
+        } else {
+            $this->updateZoneCacheRrset($zoneName, $targetName, $targetType, $remainingRecords, $ttl);
+        }
         return ['success' => true, 'result' => []];
     }
 
@@ -865,9 +1062,11 @@ return ['success' => true, 'result' => ['id' => $newRecordId]];
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
         }
 
-                $this->clearZoneCache($zoneName);
-return ['success' => true, 'deleted_count' => count($records['result'])];
-    }
+        foreach (array_keys($typesSeen) as $type) {
+            $this->removeZoneCacheRrset($zoneName, $recordName, $type);
+        }
+        return ['success' => true, 'deleted_count' => count($records['result'])];
+        }
 
     /**
      * Delete records for a name and all its subdomains
@@ -917,9 +1116,11 @@ return ['success' => true, 'deleted_count' => count($records['result'])];
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
         }
 
-                $this->clearZoneCache($zoneName);
-return ['success' => true, 'deleted_count' => count($toDelete), 'note' => 'deep'];
-    }
+        foreach ($toDelete as $item) {
+            $this->removeZoneCacheRrset($zoneName, $item['name'], $item['type']);
+        }
+        return ['success' => true, 'deleted_count' => count($toDelete), 'note' => 'deep'];
+        }
 
     /**
      * Delete a specific record by name, type, and content
@@ -986,7 +1187,11 @@ return ['success' => true, 'deleted_count' => count($toDelete), 'note' => 'deep'
             return ['success' => false, 'errors' => $res['errors'] ?? ['delete failed']];
 }
 
-        $this->clearZoneCache($zoneName);
+        if (empty($remaining)) {
+            $this->removeZoneCacheRrset($zoneName, $recordName, $type);
+        } else {
+            $this->updateZoneCacheRrset($zoneName, $recordName, $type, $remaining, $ttl ?? self::DEFAULT_TTL);
+        }
         return ['success' => true, 'result' => []];
     }
 
