@@ -593,7 +593,8 @@ function cfmod_calibrate_subdomain(int $jobId, string $mode, $cf, $sub, array &$
 
         $needUpdate = false;
         $update = [];
-        if (intval($matched['ttl'] ?? 0) !== $lr->ttl) {
+        $matchedTtl = isset($matched['ttl']) ? intval($matched['ttl']) : null;
+        if ($matchedTtl !== null && $matchedTtl !== $lr->ttl) {
             $needUpdate = true;
             $update['ttl'] = $lr->ttl;
         }
