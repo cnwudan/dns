@@ -190,7 +190,11 @@ class PowerDNSAPI
         $records = [];
         $type = $rrset['type'] ?? '';
         $name = $this->stripTrailingDot($rrset['name'] ?? '');
-        $ttl = intval($rrset['ttl'] ?? self::DEFAULT_TTL);
+        $ttlRaw = $rrset['ttl'] ?? null;
+        $ttl = $ttlRaw !== null ? intval($ttlRaw) : null;
+        if ($ttl !== null && $ttl <= 0) {
+            $ttl = self::DEFAULT_TTL;
+        }
 
         foreach (($rrset['records'] ?? []) as $record) {
             $content = $record['content'] ?? '';
@@ -376,40 +380,21 @@ class PowerDNSAPI
     public function getDnsRecords(string $zoneId, ?string $name = null, array $params = []): array
     {
         $zoneName = $this->normalizeZoneName($zoneId);
-        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
-        $res = $this->request('GET', $endpoint);
+        $trimmedName = trim((string) $name);
 
-        if (!($res['success'] ?? false)) {
-            return ['success' => false, 'errors' => $res['errors'] ?? ['query failed']];
+        if ($trimmedName !== '') {
+            $searchResult = $this->fetchRecordsByName($zoneName, $trimmedName, $params);
+            if ($searchResult['success'] ?? false) {
+                return $searchResult;
+            }
+            if (empty($searchResult['success']) && empty($searchResult['fallback'])) {
+                return $searchResult;
+            }
+            // fall back to full zone fetch when search-data is unavailable
+            return $this->fetchZoneRecords($zoneName, $params, $trimmedName);
         }
 
-        $rrsets = $res['result']['rrsets'] ?? [];
-        $result = [];
-        $targetName = $name ? $this->normalizeRecordName($name) : null;
-        $typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
-
-        foreach ($rrsets as $rrset) {
-            $rrsetName = $rrset['name'] ?? '';
-
-            // Filter by name if specified
-            if ($targetName !== null) {
-                if ($rrsetName !== $targetName) {
-                    continue;
-                }
-            }
-
-            // Filter by type if specified
-            if ($typeFilter !== null && ($rrset['type'] ?? '') !== $typeFilter) {
-                continue;
-            }
-
-            $mapped = $this->mapPdnsToCfRecord($rrset, $zoneId);
-            foreach ($mapped as $rec) {
-                $result[] = $rec;
-            }
-        }
-
-        return ['success' => true, 'result' => $result];
+        return $this->fetchZoneRecords($zoneName, $params);
     }
 
     /**
@@ -422,6 +407,116 @@ class PowerDNSAPI
             return $res['result'];
         }
         return [];
+    }
+
+    private function fetchZoneRecords(string $zoneName, array $params = [], ?string $filterName = null): array
+    {
+        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
+        $res = $this->request('GET', $endpoint);
+
+        if (!($res['success'] ?? false)) {
+            return ['success' => false, 'errors' => $res['errors'] ?? ['query failed']];
+        }
+
+        $rrsets = $res['result']['rrsets'] ?? [];
+        $result = [];
+        $targetName = $filterName ? $this->normalizeRecordName($filterName) : null;
+        if ($targetName === '@.' || $targetName === '@') {
+            $targetName = $zoneName;
+        }
+        if ($targetName !== null) {
+            $zoneTrimmed = $this->stripTrailingDot($zoneName);
+            $targetTrimmed = $this->stripTrailingDot($targetName);
+            if ($targetTrimmed !== $zoneTrimmed && substr($targetTrimmed, -strlen($zoneTrimmed)) !== $zoneTrimmed) {
+                $targetName = $this->normalizeRecordName($targetTrimmed . '.' . $zoneTrimmed);
+            }
+        }
+        $typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
+
+        foreach ($rrsets as $rrset) {
+            $rrsetName = $rrset['name'] ?? '';
+
+            if ($targetName !== null && $rrsetName !== $targetName) {
+                continue;
+            }
+
+            if ($typeFilter !== null && ($rrset['type'] ?? '') !== $typeFilter) {
+                continue;
+            }
+
+            $mapped = $this->mapPdnsToCfRecord($rrset, $zoneName);
+            foreach ($mapped as $rec) {
+                $result[] = $rec;
+            }
+        }
+
+        return ['success' => true, 'result' => $result];
+    }
+
+    private function fetchRecordsByName(string $zoneName, string $name, array $params): array
+    {
+        $searchName = $this->normalizeRecordName($name);
+        if ($searchName === '@.' || $searchName === '@') {
+            $searchName = $zoneName;
+        }
+        $zoneTrimmed = $this->stripTrailingDot($zoneName);
+        $searchTrimmed = $this->stripTrailingDot($searchName);
+        if ($searchTrimmed !== $zoneTrimmed && substr($searchTrimmed, -strlen($zoneTrimmed)) !== $zoneTrimmed) {
+            $searchName = $this->normalizeRecordName($searchTrimmed . '.' . $zoneTrimmed);
+        }
+
+        $maxResults = isset($params['per_page']) ? (int) $params['per_page'] : (int) ($params['max_results'] ?? 250);
+        $query = http_build_query([
+            'q' => $this->stripTrailingDot($searchName),
+            'object' => 'rrset',
+            'max' => max(1, min(1000, $maxResults > 0 ? $maxResults : 250)),
+        ]);
+
+        $endpoint = '/servers/' . urlencode($this->server_id) . '/search-data?' . $query;
+        $res = $this->request('GET', $endpoint);
+        if (!($res['success'] ?? false)) {
+            return ['success' => false, 'fallback' => true, 'errors' => $res['errors'] ?? ['search failed']];
+        }
+
+        $items = $res['result'] ?? [];
+        if (empty($items)) {
+            return ['success' => true, 'result' => []];
+        }
+
+        $typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
+        $rrsets = [];
+        foreach ($items as $item) {
+            $itemZone = $this->normalizeZoneName($item['zone_id'] ?? ($item['zone'] ?? ''));
+            if ($itemZone !== $zoneName) {
+                continue;
+            }
+            $itemName = $this->normalizeRecordName($item['name'] ?? $searchName);
+            $type = strtoupper($item['type'] ?? '');
+            if ($type === '' || ($typeFilter && $type !== $typeFilter)) {
+                continue;
+            }
+            if (!isset($rrsets[$itemName][$type])) {
+                $rrsets[$itemName][$type] = [
+                    'name' => $itemName,
+                    'type' => $type,
+                    'ttl' => $item['ttl'] ?? null,
+                    'records' => [],
+                ];
+            }
+            $rrsets[$itemName][$type]['records'][] = [
+                'content' => $item['content'] ?? '',
+                'disabled' => !empty($item['disabled']),
+            ];
+        }
+
+        $result = [];
+        foreach ($rrsets as $typeGroup) {
+            foreach ($typeGroup as $rrset) {
+                $result = array_merge($result, $this->mapPdnsToCfRecord($rrset, $zoneName));
+            }
+        }
+
+        return ['success' => true, 'result' => $result];
     }
 
     /**
