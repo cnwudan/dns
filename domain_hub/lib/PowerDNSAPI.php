@@ -660,21 +660,28 @@ class PowerDNSAPI
 
     private function fetchZoneRecords(string $zoneName, array $params = [], ?string $filterName = null): array
 {
-        if (!$this->ensureZoneRecordCache($zoneName)) {
-            return $this->fetchZoneRecordsWithoutCache($zoneName, $params, $filterName);
-        }
-
-        $normalized = $this->normalizeZoneName($zoneName);
-        $cacheKey = strtolower($normalized);
-        $cacheIndex = $this->zoneRecordCache[$cacheKey]['index'] ?? [];
-        $targetName = $this->normalizeTargetName($filterName, $normalized);
-        $typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
-        $result = $this->collectRecordsFromCacheIndex($cacheIndex, $targetName, $typeFilter);
-
-        return ['success' => true, 'result' => $result];
-    }
-
-    private function fetchZoneRecordsWithoutCache(string $zoneName, array $params = [], ?string $filterName = null): array
+if (!$this->ensureZoneRecordCache($zoneName)) {
+if ($filterName !== null) {
+$targeted = $this->fetchZoneRecordsPrecise($zoneName, $filterName, $params);
+if (($targeted['success'] ?? false) && empty($targeted['fallback'])) {
+return $targeted;
+}
+$search = $this->fetchRecordsByName($this->normalizeZoneName($zoneName), $filterName, $params);
+if ($search['success'] ?? false) {
+return $search;
+}
+}
+return $this->fetchZoneRecordsWithoutCache($zoneName, $params, $filterName);
+}
+$normalized = $this->normalizeZoneName($zoneName);
+$cacheKey = strtolower($normalized);
+$cacheIndex = $this->zoneRecordCache[$cacheKey]['index'] ?? [];
+$targetName = $this->normalizeTargetName($filterName, $normalized);
+$typeFilter = !empty($params['type']) ? strtoupper($params['type']) : null;
+$result = $this->collectRecordsFromCacheIndex($cacheIndex, $targetName, $typeFilter);
+return ['success' => true, 'result' => $result];
+}
+private function fetchZoneRecordsWithoutCache(string $zoneName, array $params = [], ?string $filterName = null): array
     {
         $normalized = $this->normalizeZoneName($zoneName);
         $detail = $this->loadZoneDetail($normalized);
@@ -688,7 +695,52 @@ class PowerDNSAPI
         return ['success' => true, 'result' => $records];
     }
 
-    private function fetchZoneRecordsPrecise(string $zoneName, string $name, array $params = []): array
+    private function fetchExistingRrsetRecords(string $zoneName, string $recordName, string $type): array
+{
+$normalizedZone = $this->normalizeZoneName($zoneName);
+$targetName = $this->normalizeTargetName($recordName, $normalizedZone) ?? $this->normalizeRecordName($recordName);
+$typeFilter = strtoupper($type);
+$query = ['rrset_name' => $targetName, 'rrset_type' => $typeFilter];
+$endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($normalizedZone) . '?' . http_build_query($query);
+$res = $this->request('GET', $endpoint);
+if (($res['success'] ?? false)) {
+foreach (($res['result']['rrsets'] ?? []) as $rrset) {
+if (($rrset['name'] ?? '') === $targetName && strtoupper($rrset['type'] ?? '') === $typeFilter) {
+return ['success' => true, 'records' => $rrset['records'] ?? [], 'ttl' => $rrset['ttl'] ?? null];
+}
+}
+}
+$searchQuery = [
+'q' => $this->stripTrailingDot($targetName),
+'object' => 'record',
+'max' => 500,
+];
+$searchEndpoint = '/servers/' . urlencode($this->server_id) . '/search-data?' . http_build_query($searchQuery);
+$search = $this->request('GET', $searchEndpoint);
+if (($search['success'] ?? false)) {
+$records = [];
+$ttl = null;
+foreach (($search['result'] ?? []) as $item) {
+$itemZone = $this->normalizeZoneName($item['zone'] ?? ($item['zone_id'] ?? ''));
+if ($itemZone !== $normalizedZone) { continue; }
+$itemName = $this->normalizeRecordName($item['name'] ?? '');
+if ($itemName !== $targetName) { continue; }
+$itemType = strtoupper($item['type'] ?? '');
+if ($itemType !== $typeFilter) { continue; }
+$records[] = [
+'content' => $item['content'] ?? '',
+'disabled' => !empty($item['disabled']),
+];
+if ($ttl === null && isset($item['ttl'])) { $ttl = $item['ttl']; }
+}
+if (!empty($records)) {
+return ['success' => true, 'records' => $records, 'ttl' => $ttl];
+}
+}
+return ['success' => false, 'errors' => ['rrset_lookup_failed']];
+}
+
+private function fetchZoneRecordsPrecise(string $zoneName, string $name, array $params = []): array
     {
         $normalizedZone = $this->normalizeZoneName($zoneName);
         $targetName = $this->normalizeTargetName($name, $normalizedZone) ?? $this->normalizeRecordName($name);
@@ -778,160 +830,146 @@ private function fetchRecordsByName(string $zoneName, string $name, array $param
     /**
      * Create a DNS record
      */
-    public function createDnsRecord(string $zoneId, string $name, string $type, string $content, $ttl = 3600, bool $proxied = false): array
-    {
-        $zoneName = $this->normalizeZoneName($zoneId);
-        $recordName = $this->normalizeRecordName($name);
-        $type = strtoupper($type);
-        $ttl = $this->normalizeTtl($ttl);
-
-        // Normalize content for certain record types
-        if (in_array($type, ['CNAME', 'MX', 'NS', 'PTR'])) {
-            $content = $this->ensureTrailingDot($content);
-        }
-        if ($type === 'TXT') {
-            $content = $this->normalizeTxtInput($content, true);
-        }
-
-        // First, get existing records for this name+type
-        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
-        $zoneRes = $this->request('GET', $endpoint);
-
-        $existingRecords = [];
-        if ($zoneRes['success'] ?? false) {
-            foreach (($zoneRes['result']['rrsets'] ?? []) as $rrset) {
-                if (($rrset['name'] ?? '') === $recordName && ($rrset['type'] ?? '') === $type) {
-                    foreach (($rrset['records'] ?? []) as $rec) {
-                        $existingRecords[] = ['content' => $rec['content'], 'disabled' => $rec['disabled'] ?? false];
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Add new record to existing
-        $existingRecords[] = ['content' => $content, 'disabled' => false];
-
-        // PATCH the zone with updated RRset
-        $payload = [
-            'rrsets' => [
-                [
-                    'name' => $recordName,
-                    'type' => $type,
-                    'ttl' => $ttl,
-                    'changetype' => 'REPLACE',
-                    'records' => $existingRecords,
-                ]
-            ]
-        ];
-
-        $res = $this->request('PATCH', $endpoint, $payload);
-
-        if (!($res['success'] ?? false)) {
-            return ['success' => false, 'errors' => $res['errors'] ?? ['create failed']];
-        }
-
-        $this->updateZoneCacheRrset($zoneName, $recordName, $type, $existingRecords, $ttl);
-        $recordId = $this->generateRecordId($this->stripTrailingDot($recordName), $type, $this->stripTrailingDot($content));
-
-        return [
-            'success' => true,
-            'result' => [
-                'id' => $recordId,
-                'name' => $this->stripTrailingDot($recordName),
-                'type' => $type,
-                'content' => $this->stripTrailingDot($content),
-                'ttl' => $ttl,
-                'proxied' => false,
-            ]
-        ];
-    }
-
-    /**
-     * Update a DNS record
-     */
-    public function updateDnsRecord(string $zoneId, string $recordId, array $data): array
-    {
-        $zoneName = $this->normalizeZoneName($zoneId);
-        $type = strtoupper($data['type'] ?? 'A');
-        $name = $data['name'] ?? '';
-        $content = $data['content'] ?? '';
-        $ttl = $this->normalizeTtl($data['ttl'] ?? self::DEFAULT_TTL);
-
-        if ($name === '' || $content === '') {
-            return ['success' => false, 'errors' => ['missing required fields']];
-        }
-
-        $recordName = $this->normalizeRecordName($name);
-        $formattedContent = $this->formatRecordContentForPatch($type, $content, $data);
-
-        $zoneDetail = $this->loadZoneDetail($zoneName);
-        if (!($zoneDetail['success'] ?? false)) {
-            return ['success' => false, 'errors' => $zoneDetail['errors'] ?? ['query failed']];
-        }
-
-        $rrsets = $zoneDetail['result']['rrsets'] ?? [];
-        $recordsPayload = [];
-        $recordMatched = false;
-        $ttlForPatch = $ttl;
-
-        foreach ($rrsets as $rrset) {
-            if (($rrset['name'] ?? '') === $recordName && strtoupper($rrset['type'] ?? '') === $type) {
-                $ttlForPatch = $this->normalizeTtl($rrset['ttl'] ?? $ttl);
-                foreach (($rrset['records'] ?? []) as $record) {
-                    $existingId = $this->buildRecordIdFromRaw($recordName, $type, $record['content'] ?? '');
-                    if ($existingId === $recordId) {
-                        $recordsPayload[] = [
-                            'content' => $formattedContent,
-                            'disabled' => !empty($record['disabled']),
-                        ];
-                        $recordMatched = true;
-                    } else {
-                        $recordsPayload[] = [
-                            'content' => $record['content'],
-                            'disabled' => !empty($record['disabled']),
-                        ];
-                    }
-                }
-                break;
-            }
-        }
-
-        if (empty($recordsPayload)) {
-            $recordsPayload[] = ['content' => $formattedContent, 'disabled' => false];
-        } elseif (!$recordMatched) {
-            $recordsPayload[] = ['content' => $formattedContent, 'disabled' => false];
-        }
-
-        $endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
-        $payload = [
-            'rrsets' => [
-                [
-                    'name' => $recordName,
-                    'type' => $type,
-                    'ttl' => $ttlForPatch,
-                    'changetype' => 'REPLACE',
-                    'records' => $recordsPayload,
-                ]
-            ]
-        ];
-
-        $res = $this->request('PATCH', $endpoint, $payload);
-
-        if (!($res['success'] ?? false)) {
-            return ['success' => false, 'errors' => $res['errors'] ?? ['update failed']];
-        }
-
-        $newRecordId = $this->buildRecordIdFromRaw($recordName, $type, $formattedContent);
-
-                $this->updateZoneCacheRrset($zoneName, $recordName, $type, $recordsPayload, $ttlForPatch);
+    public function createDnsRecord(string $zoneId, string $name, string $type,
+string $content, $ttl = 3600, bool $proxied = false): array
+{
+$zoneName = $this->normalizeZoneName($zoneId);
+$recordName = $this->normalizeRecordName($name);
+$type = strtoupper($type);
+$ttl = $this->normalizeTtl($ttl);
+// Normalize content for certain record types
+if (in_array($type, ['CNAME', 'MX', 'NS', 'PTR'])) {
+$content = $this->ensureTrailingDot($content);
+}
+if ($type === 'TXT') {
+$content = $this->normalizeTxtInput($content, true);
+}
+// First, get existing records for this name+type
+$lookup = $this->fetchExistingRrsetRecords($zoneName, $recordName, $type);
+$existingRecords = [];
+$ttlForPatch = $ttl;
+if ($lookup['success'] ?? false) {
+$existingRecords = array_map(function ($rec) {
+return [
+'content' => $rec['content'] ?? '',
+'disabled' => !empty($rec['disabled']),
+];
+}, $lookup['records'] ?? []);
+$ttlForPatch = $this->normalizeTtl($lookup['ttl'] ?? $ttl);
+}
+// Add new record to existing
+$existingRecords[] = ['content' => $content, 'disabled' => false];
+$endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
+// PATCH the zone with updated RRset
+$payload = [
+'rrsets' => [
+[
+'name' => $recordName,
+'type' => $type,
+'ttl' => $ttlForPatch,
+'changetype' => 'REPLACE',
+'records' => $existingRecords,
+]
+]
+];
+$res = $this->request('PATCH', $endpoint, $payload);
+if (!($res['success'] ?? false)) {
+return ['success' => false, 'errors' => $res['errors'] ?? ['create failed']];
+}
+$this->updateZoneCacheRrset($zoneName, $recordName, $type, $existingRecords, $ttlForPatch);
+$recordId = $this->generateRecordId($this->stripTrailingDot($recordName)
+, $type, $this->stripTrailingDot($content));
+return [
+'success' => true,
+'result' => [
+'id' => $recordId,
+'name' => $this->stripTrailingDot($recordName),
+'type' => $type,
+'content' => $this->stripTrailingDot($content),
+'ttl' => $ttlForPatch,
+'proxied' => false,
+]
+];
+}
+public function updateDnsRecord(string $zoneId, string $recordId, array $data): array
+{
+$zoneName = $this->normalizeZoneName($zoneId);
+$type = strtoupper($data['type'] ?? 'A');
+$name = $data['name'] ?? '';
+$content = $data['content'] ?? '';
+$ttl = $this->normalizeTtl($data['ttl'] ?? self::DEFAULT_TTL);
+if ($name === '' || $content === '') {
+return ['success' => false, 'errors' => ['missing required fields']];
+}
+$recordName = $this->normalizeRecordName($name);
+$formattedContent = $this->formatRecordContentForPatch($type, $content, $data);
+$lookup = $this->fetchExistingRrsetRecords($zoneName, $recordName, $type);
+$recordsPayload = [];
+$ttlForPatch = $ttl;
+if ($lookup['success'] ?? false) {
+$recordsPayload = array_map(function ($rec) {
+return [
+'content' => $rec['content'] ?? '',
+'disabled' => !empty($rec['disabled']),
+];
+}, $lookup['records'] ?? []);
+$ttlForPatch = $this->normalizeTtl($lookup['ttl'] ?? $ttl);
+} else {
+$zoneDetail = $this->loadZoneDetail($zoneName);
+if (!($zoneDetail['success'] ?? false)) {
+return ['success' => false, 'errors' => $zoneDetail['errors'] ?? ['query failed']];
+}
+foreach (($zoneDetail['result']['rrsets'] ?? []) as $rrset) {
+if (($rrset['name'] ?? '') === $recordName && strtoupper($rrset['type'] ?? '') === $type) {
+$ttlForPatch = $this->normalizeTtl($rrset['ttl'] ?? $ttl);
+foreach (($rrset['records'] ?? []) as $record) {
+$recordsPayload[] = [
+'content' => $record['content'],
+'disabled' => !empty($record['disabled']),
+];
+}
+break;
+}
+}
+}
+if (empty($recordsPayload)) {
+$recordsPayload[] = ['content' => $formattedContent, 'disabled' => false];
+$recordMatched = true;
+} else {
+$recordMatched = false;
+foreach ($recordsPayload as &$record) {
+$existingId = $this->buildRecordIdFromRaw($recordName, $type, $record['content'] ?? '');
+if ($existingId === $recordId) {
+$record['content'] = $formattedContent;
+$recordMatched = true;
+}
+}
+unset($record);
+if (!$recordMatched) {
+$recordsPayload[] = ['content' => $formattedContent, 'disabled' => false];
+}
+}
+$endpoint = '/servers/' . urlencode($this->server_id) . '/zones/' . urlencode($zoneName);
+$payload = [
+'rrsets' => [
+[
+'name' => $recordName,
+'type' => $type,
+'ttl' => $ttlForPatch,
+'changetype' => 'REPLACE',
+'records' => $recordsPayload,
+]
+]
+];
+$res = $this->request('PATCH', $endpoint, $payload);
+if (!($res['success'] ?? false)) {
+return ['success' => false, 'errors' => $res['errors'] ?? ['update failed']];
+}
+$this->updateZoneCacheRrset($zoneName, $recordName, $type, $recordsPayload, $ttlForPatch);
+$newRecordId = $this->buildRecordIdFromRaw($recordName, $type, $formattedContent);
 return ['success' => true, 'result' => ['id' => $newRecordId]];
-    }
-
-    /**
-     * Delete a subdomain/record
-     */
-        public function deleteSubdomain(string $zoneId, string $recordId): array
+}
+public function deleteSubdomain(string $zoneId, string $recordId): array
     {
         $zoneName = $this->normalizeZoneName($zoneId);
         $recordId = (string) $recordId;
